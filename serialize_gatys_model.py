@@ -1,4 +1,5 @@
 # Copyright 2017, Xavier Snelgrove
+from gram import construct_gatys_model
 import os
 if __name__ == "__main__":
     from gram import load_model
