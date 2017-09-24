@@ -27,7 +27,7 @@ def load_model(padding='valid', data_dir="model_data"):
         raise ValueError("Invalid padding mode. Wanted one of ['padding', 'valid'], got: {}".format(padding))
 
     if not os.path.exists(fname):
-        raise FileNotFoundError("Couldn't find model file at {}. Use `serialize_gatys_model.py` to create one")
+        raise FileNotFoundError("Couldn't find model file at {}. Use `serialize_gatys_model.py` to create one".format(fname))
 
     return keras.models.load_model(fname)
 
