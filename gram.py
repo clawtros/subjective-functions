@@ -37,8 +37,10 @@ def load_model(padding='valid', data_dir="model_data"):
 
     return keras.models.load_model(fname)
 
+
 def PrintLayer(msg):
     return Lambda(lambda x: K.print_tensor(x, msg))
+
 
 def construct_gatys_model(padding='valid'):
     default_model = vgg19.VGG19(weights='imagenet')
@@ -68,7 +70,7 @@ def construct_gatys_model(padding='valid'):
             continue
         new_layers.append(new)
     model = keras.models.Sequential(layers=new_layers)
-    gatys_weights = np.load("../gatys/gatys.npy", encoding='latin1').item() # encoding because of python2
+    gatys_weights = np.load("../gatys/gatys.npy", encoding='latin1').item()  # encoding because of python2
     # Previously, we loaded weights from Keras' VGG-16. Now, instead, we'll use Gatys' VGG-19!
     for i, new_layer in enumerate(model.layers):
         if 'conv' in new_layer.name:
@@ -80,6 +82,7 @@ def construct_gatys_model(padding='valid'):
     return model
 
 colour_offsets = np.asarray([103.939, 116.779, 123.68])
+
 
 def preprocess(img):
     if hasattr(img, 'shape'):
@@ -171,53 +174,6 @@ def reduce_layer(a=0.4, padding_mode='valid'):
         return (input_shape[0],) + tuple(new_space) + (input_shape[3],)
 
     return Lambda(fn, shape)
-
-
-def expand_layer(a=0.4, padding_mode='same'):
-    kernel_1d = [0.25 - a/2, 0.25, a, 0.25, 0.25 - a/2]
-
-    kernel_3d = np.zeros((5, 1, 3, 3), 'float32')
-    kernel_3d[:, 0, 0, 0] = kernel_1d
-    kernel_3d[:, 0, 1, 1] = kernel_1d
-    kernel_3d[:, 0, 2, 2] = kernel_1d
-
-    def fn(x):
-        #conv_even = K.conv2d(K.conv2d(x, even_kernel_3d),
-                    #K.permute_dimensions(even_kernel_3d, (1, 0, 2, 3)))
-        #conv_odd = K.conv2d(K.conv2d(x, odd_kernel_3d),
-                    #K.permute_dimensions(odd_kernel_3d, (1, 0, 2, 3)))
-        input_shape = K.shape(x)
-
-        dim1 = conv_utils.conv_input_length(
-                input_shape[1],
-                5,
-                padding=padding_mode,
-                stride=2)
-        dim2 = conv_utils.conv_input_length(
-                input_shape[2],
-                5,
-                padding=padding_mode,
-                stride=2)
-
-        output_shape_a = (input_shape[0], dim1, input_shape[2], input_shape[3])
-        output_shape_b = (input_shape[0], dim1, dim2, input_shape[3])
-
-        upconvolved = K.conv2d_transpose(x,
-                                         kernel_3d,
-                                         output_shape_a,
-                                         strides=(2, 1),
-                                         padding=padding_mode)
-        upconvolved = K.conv2d_transpose(upconvolved,
-                                         K.permute_dimensions(kernel_3d, (1, 0, 2, 3)),
-                                         output_shape_b,
-                                         strides=(1, 2),
-                                         padding=padding_mode)
-        return 4 * upconvolved
-    return Lambda(fn)
-
-
-def compute_gram(x):
-    return gram_node(K.variable(x)).eval()
 
 
 def make_gram_model(base_model):
@@ -329,7 +285,7 @@ def diff_loss(model, targets):
         # Note the slight hack in the lambda with default parameter below; this allows us to effectively create
         # a closure capturing the value of target_gram rather than having them all target the *same* gram
         # (which, incidentally,creates some pretty interesting effects)
-        diff_layers.append(
+    diff_layers.append(
             Lambda(lambda x, target=target: K.sum(K.square(target - x[0])),
                    output_shape=lambda input_shape: [1])([base]))
     if len(diff_layers) > 1:
@@ -338,76 +294,6 @@ def diff_loss(model, targets):
         total_diff = diff_layers[0]
 
     return total_diff
-
-
-def cropped_diff(x):
-    ''' Crop a to the shape of b'''
-    a, b = x
-    b_shape = K.shape(b)
-    return a[:, :b_shape[1], :b_shape[2], :] - b
-
-
-def laplacian_from_gaussian(pyramid_model):
-    laplacian_levels = []
-    for output_a, output_b in zip(pyramid_model.outputs, pyramid_model.outputs[1:]):
-        expanded = expand_layer()(output_b)
-        delta = Lambda(cropped_diff)([output_a, expanded])
-        laplacian_levels.append(delta)
-    return laplacian_levels
-
-
-def lap1_diff(laplacian, frame_step=1):
-    ''' Model which takes the lap-1 distance between frames `frame_step` apart
-    in the batch '''
-    deltas = []
-    for i, lap_level in enumerate(laplacian):
-        # Take the difference of the Laplacian pyramid of this layer vs. the next
-        diff = Lambda(lambda lap_level, frame_step=frame_step:
-                K.batch_flatten(
-                    lap_level - K.concatenate([lap_level[frame_step:], lap_level[0:frame_step]], axis=0)))(lap_level)
-        # scale for good measure
-        diff = Lambda(lambda x, scale=2.**-(i-1): scale*x)(diff)
-        # diff = K.batch_flatten(lap_layer - K.concatenate([lap_layer[frame_step:], lap_layer[0:frame_step]], axis=0))
-        deltas.append(diff) # diff: (frames, lap-pixels)
-
-    out = keras.layers.concatenate(deltas, axis=1)  # (frames, lap-pixels)
-    # I use mean here instead of sum to make it more agnostic to total pixel count.
-    out = Lambda(lambda x: K.mean(K.abs(x), axis=1))(out)  # (frames,)
-    return out
-
-
-def lap_loss(pyramid_model, target_distance=1., order=2):
-    # The pyramid model is a Gaussian pyramid, now compute the Laplacian pyramid.
-    laplacian = laplacian_from_gaussian(pyramid_model)
-
-    order_errors = []
-    for frame_step in range(1, order+1):
-        out = lap1_diff(laplacian, frame_step)
-        out = PrintLayer("mean abs diff")(out)
-        # Previously I took the square root of this mean...
-        out = Lambda(lambda x: K.expand_dims(K.mean(K.square(x - target_distance*frame_step))))(out)
-        order_errors.append(out)
-
-    return keras.layers.add(order_errors)
-
-
-def gram_loss_callable(gram_model, target_grams, shape):
-    ''' Returns a function which takes in an image and outputs both the gram-matrix
-    loss of that image relative to the targets, and the gradients of that loss with respect
-    to the image pixels'''
-    loss = diff_loss(gram_model, target_grams)
-
-    gradients = K.gradients(loss, gram_model.input)
-    if keras.backend.backend() == 'tensorflow':
-        gradients = gradients[0]  # This is a Keras inconsistency between theano and tf backends
-
-    loss_and_gradients = K.function([gram_model.input], [loss, gradients])
-
-    def callable(x):
-        deflattened = x.reshape([-1] + list(shape) + [3])
-        loss, grad = loss_and_gradients([deflattened])
-        return loss.astype('float64'), np.ravel(grad.astype('float64'))
-    return callable
 
 
 def loss_and_gradients_callable(loss_model, shape):
